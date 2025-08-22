@@ -1,0 +1,3 @@
+.syncthing.*
+.nfs*
+*.sync-conflict-*
