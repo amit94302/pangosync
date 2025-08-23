@@ -8,10 +8,15 @@ PANGOLIN_API_KEY        = os.environ.get("PANGOLIN_API_KEY", "")
 PANGOLIN_ORG_ID         = os.environ.get("PANGOLIN_ORG_ID", "")
 PANGOLIN_SITE_ID        = os.environ.get("PANGOLIN_SITE_ID", "")  # NiceId or ID expected by your instance
 PANGOLIN_SITE_NUM_ID    = int(os.environ.get("PANGOLIN_SITE_NUM_ID", "1"))
-TRAEFIK_AUTH_MIDDLEWARE = os.environ.get("TRAEFIK_AUTH_MIDDLEWARE", "auth@file")  #
-POLL_SEC                = int(os.environ.get("POLL_SEC", "60"))
+TRAEFIK_AUTH_MIDDLEWARE = os.environ.get("TRAEFIK_AUTH_MIDDLEWARE", "auth@file")  # Traefik authentication middleware
+DISABLE_ON_REMOVE       = os.environ.get("DISABLE_ON_REMOVE", "true").lower() in ("1", "true", "yes") # Disable all the resources on service removal
+PANGOLIN_POLL_TIMEOUT   = int(os.environ.get("PANGOLIN_POLL_TIMEOUT", "0"))
+PANGOLIN_POLL_INTERVAL  = int(os.environ.get("PANGOLIN_POLL_INTERVAL", "5"))
 DRY_RUN                 = os.environ.get("DRY_RUN", "0") == "1"
 DEBUG                   = os.environ.get("DEBUG", "0") == "1"
+
+docker_env = docker.from_env()
+service_cache = {}
 
 if not (PANGOLIN_API_URL and PANGOLIN_API_KEY and PANGOLIN_ORG_ID and PANGOLIN_SITE_ID and PANGOLIN_SITE_NUM_ID):
   print("ERROR: Set PANGOLIN_API_URL, PANGOLIN_API_KEY, PANGOLIN_ORG_ID, PANGOLIN_SITE_ID, and PANGOLIN_SITE_NUM_ID")
@@ -35,6 +40,21 @@ def pangolin_ok():
   except Exception as e:
     log("ERROR: Pangolin health check failed:", e)
     return False
+
+def wait_for_pangolin(timeout=0, interval=5):
+  """Wait until pangolin_ok() returns True, retrying every `interval` seconds."""
+  start = time.time()
+  while True:
+    if pangolin_ok():
+      log("Pangolin API is healthy ✅")
+      return True
+    else:
+      log("Waiting for Pangolin API...", PANGOLIN_API_URL)
+    
+    if timeout and (time.time() - start) > timeout:
+      log("Timeout reached while waiting for Pangolin API")
+      return False
+    time.sleep(interval)
 
 def extract_domains(labels: dict) -> list[str]:
   """
@@ -160,7 +180,7 @@ def build_create_payload(name, subdomain, domain_id, site_id):
     "domainId": domain_id
   }
 
-def build_update_payload(name, subdomain, domain_id, labels):
+def build_update_payload(name, subdomain, domain_id, labels, enabled):
   """Full payload for Pangolin update (POST)."""
   sso_enabled = False
   # Check if any traefik router has auth@file middleware
@@ -180,7 +200,7 @@ def build_update_payload(name, subdomain, domain_id, labels):
     "sso": sso_enabled,
     "blockAccess": False,
     "emailWhitelistEnabled": False,
-    "enabled": True
+    "enabled": enabled
   }
 
 def create_resource(payload):
@@ -259,100 +279,222 @@ def sync_targets(resource_id: int, ip: str, method: str, port: int, enabled: boo
   log(f"Target already correct for resource {resource_id} -> {method}://{ip}:{port}")
   return True
 
-def main_loop():
-  if not pangolin_ok():
-    log("ERROR: Pangolin API not reachable at", PANGOLIN_API_URL)
-    sys.exit(3)
-
-  client = docker.DockerClient.from_env()
-
-  while True:
+def listen_swarm_events():
+  for event in docker_env.events(decode=True):
     try:
-      services = client.services.list()
-      for svc in services:
-        labels = svc.attrs.get("Spec", {}).get("Labels", {}) or {}
-        if labels.get("traefik.enable", "").lower() not in ("true", "1", "yes"):
-          # Allow opt-in with a label to avoid surprises
-          if labels.get("pangolin.autosync", "").lower() not in ("true", "1", "yes"):
-            continue
+      action = event.get("Action")
+      typ = event.get("Type")
+      actor = event.get("Actor", {}).get("Attributes", {})
 
-        # 1. Derive method from labels
-        target_connection_scheme = "http"
-        for k, v in labels.items():
-          if k.startswith("traefik.http.services.") and k.endswith(".loadbalancer.server.scheme"):
-            if v.lower() == "https":
-              target_connection_scheme = "https"
-            break
-
-        # domain precedence: explicit > from rule
-        domains = extract_domains(labels)  # return a list
-        if not domains:
-          print(f"SKIP {service_name}: no domain found in labels")
-          continue
-
-        # Get container hostname
-        hostname = derive_hostname(svc, domains)
-        
-        # Get internal container port
-        port = service_host_published_port(svc)
-        if not port:
-          log(f"SKIP {svc.name}: no host-published port and no explicit traefik service port label")
-          continue
-
-        for domain in domains:
-          resources, err = list_resources()
-          if resources is None:
-            log(f"ERROR listing resources: {err}")
-            return
-          # Pangolin often uses a niceId string (frequently the domain) in URL paths
-          name = hostname # domain
-          exists, resource_id = find_resource_by_domain(resources, domain)
-
-          subdomain, domain_id = split_domain(domain)
-          if not subdomain:
-            log(f"SKIP {name} -> {domain}: apex domain, no subdomain")
-            continue
-          if exists:
-            # Update resource
-            payload = build_update_payload(name, subdomain, domain_id, labels)
-            ok, resp = update_resource(resource_id, payload)
-            if ok:
-              log(f"UPDATED resource {name} -> {domain}")
-            else:
-              log(f"FAILED update {name}: {resp}")
-          else:
-            # Create and update resource
-            payload = build_create_payload(name, subdomain, domain_id, PANGOLIN_SITE_NUM_ID)
-            ok, resp = create_resource(payload)
-            if ok:
-              log(f"CREATED resource {name} -> {domain}")
-            else:
-              log(f"FAILED create {name}: {resp}")
-            
-            resources, err = list_resources()
-            if resources is None:
-              log(f"ERROR listing resources: {err}")
-              return
-            exists, resource_id = find_resource_by_domain(resources, domain)
-            payload = build_update_payload(name, subdomain, domain_id, labels)
-            ok, resp = update_resource(resource_id, payload)
-            if ok:
-              log(f"UPDATED resource {name} -> {domain}")
-            else:
-              log(f"FAILED update {name}: {resp}")
-          
-          sync_targets(
-            resource_id=resource_id,
-            ip=hostname,                     # usually the Docker service name or container hostname
-            method=target_connection_scheme, # "http" if Traefik routes HTTP, "https" otherwise
-            port=port,                       # internal service port
-            enabled=True
-          )
+      # Listen only to Swarm services (not every container event)
+      if typ == "service" and action in ["create", "update", "remove"]:
+        print(f"[EVENT] Service {action}: {json.dumps(actor)}")
+        handle_service_event(action, actor)
 
     except Exception as e:
-      log("ERROR in loop:", repr(e))
+      print(f"[ERROR] Failed processing event: {e}")
 
-    time.sleep(POLL_SEC)
+def get_service_with_retry(client, service_name, retries=20, delay=0.5):
+  for attempt in range(retries):
+    try:
+      service = client.services.get(service_name)
+      labels = service.attrs.get("Spec", {}).get("Labels", {}) or {}
+      return service, labels
+    except (docker.errors.NotFound, KeyError):
+      time.sleep(delay)
+  raise RuntimeError(f"Service {service_name} not ready after {retries} retries")
+
+def handle_service_event(action, attrs):
+  service_name = attrs.get("name")
+  if not service_name:
+    return
+  service = service_cache.get(service_name)
+  labels = {}
+
+  if not service:
+    try:
+      service, labels = get_service_with_retry(docker_env, service_name)
+      service_cache[service_name] = service
+    except RuntimeError as e:
+      log(f"[ERROR] Failed to fetch service {service_name}: {e}")
+      return
+  else:
+    labels = service.attrs.get("Spec", {}).get("Labels", {}) or {}
+  print(f"Service {service_name} {action} detected")
+  # print(f"{labels}")
+  
+  # domain precedence: explicit > from rule
+  domains = extract_domains(labels)  # return a list
+
+  # Get container hostname
+  hostname = derive_hostname(service, domains)
+
+  # 1. Derive method from labels
+  target_connection_scheme = "http"
+  for k, v in labels.items():
+    if k.startswith("traefik.http.services.") and k.endswith(".loadbalancer.server.scheme"):
+      if v.lower() == "https":
+        target_connection_scheme = "https"
+      break
+
+  for domain in domains:
+    # Get internal container port
+    port = service_host_published_port(service)
+    if not port:
+      log(f"SKIP {hostname}: no host-published port and no explicit traefik service port label")
+      continue
+    if labels.get("traefik.enable", "").lower() not in ("true", "1", "yes"):
+      # Allow opt-in with a label to avoid surprises
+      if labels.get("pangolin.autosync", "").lower() not in ("true", "1", "yes"):
+        print(f"No labels found for {hostname}. Might be routed using dynamic config file.")
+        continue
+    resources, err = list_resources()
+    if resources is None:
+      log(f"ERROR listing resources: {err}")
+      return
+    exists, resource_id = find_resource_by_domain(resources, domain)
+    subdomain, domain_id = split_domain(domain)
+    enabled = True
+    
+    if action in ["create", "update"]:
+      try:
+        service_cache[service_name] = service  # cache the full spec
+        print(f"[{action.upper()}] {service_name} cached")
+        # Create resource in Pangolin
+        if not exists:
+          payload = build_create_payload(hostname, subdomain, domain_id, PANGOLIN_SITE_NUM_ID)
+          ok, resp = create_resource(payload)
+          if ok:
+            log(f"CREATED resource {hostname} -> {domain}")
+          else:
+            log(f"FAILED create {hostname}: {resp}")
+      except docker.errors.NotFound:
+        print(f"[WARN] {hostname} not found at {action}")
+    elif action == "remove":
+      # Mark resource disabled in Pangolin (if DISABLE_ON_REMOVE = true)
+      if exists:
+        if DISABLE_ON_REMOVE:
+          enabled = False
+          print(f"Disabling resource for {hostname} -> {domain}")
+      service_popped = service_cache.pop(service_name, None)
+      if service_popped:
+        print(f"[REMOVE] {hostname}: Removing from cache")
+      else:
+        print(f"[REMOVE] {hostname}: Not found in cache")
+      
+    # Update resource      
+    resources, err = list_resources()
+    if resources is None:
+      log(f"ERROR listing resources: {err}")
+      return
+    exists, resource_id = find_resource_by_domain(resources, domain)
+    if exists:
+      payload = build_update_payload(hostname, subdomain, domain_id, labels, enabled)
+      ok, resp = update_resource(resource_id, payload)
+      if ok:
+        log(f"UPDATED resource {hostname} -> {domain}")
+      else:
+        log(f"FAILED update {hostname}: {resp}")
+
+    sync_targets(
+      resource_id=resource_id,
+      ip=hostname,                     # usually the Docker service name or container hostname
+      method=target_connection_scheme, # "http" if Traefik routes HTTP, "https" otherwise
+      port=port,                       # internal service port
+      enabled=True
+    )
+
+def sync_services():
+  client = docker.DockerClient.from_env()
+
+  services = client.services.list()
+  
+  for service in services:
+    service_name = service.attrs.get("Spec", {}).get("Name")
+    service_cache[service_name] = service  # cache the full spec
+    labels = service.attrs.get("Spec", {}).get("Labels", {}) or {}
+    if labels.get("traefik.enable", "").lower() not in ("true", "1", "yes"):
+      # Allow opt-in with a label to avoid surprises
+      if labels.get("pangolin.autosync", "").lower() not in ("true", "1", "yes"):
+        continue
+
+    # 1. Derive method from labels
+    target_connection_scheme = "http"
+    for k, v in labels.items():
+      if k.startswith("traefik.http.services.") and k.endswith(".loadbalancer.server.scheme"):
+        if v.lower() == "https":
+          target_connection_scheme = "https"
+        break
+
+    # domain precedence: explicit > from rule
+    domains = extract_domains(labels)  # return a list
+    if not domains:
+      print(f"SKIP {service.name}: no domain found in labels")
+      continue
+
+    # Get container hostname
+    hostname = derive_hostname(service, domains)
+    
+    # Get internal container port
+    port = service_host_published_port(service)
+    if not port:
+      log(f"SKIP {service.name}: no host-published port and no explicit traefik service port label")
+      continue
+
+    for domain in domains:
+      resources, err = list_resources()
+      if resources is None:
+        log(f"ERROR listing resources: {err}")
+        return
+      # Pangolin often uses a niceId string (frequently the domain) in URL paths
+      name = hostname # domain
+      exists, resource_id = find_resource_by_domain(resources, domain)
+
+      subdomain, domain_id = split_domain(domain)
+      if not subdomain:
+        log(f"SKIP {name} -> {domain}: apex domain, no subdomain")
+        continue
+      if exists:
+        # Update resource
+        payload = build_update_payload(name, subdomain, domain_id, labels, True)
+        ok, resp = update_resource(resource_id, payload)
+        if ok:
+          log(f"UPDATED resource {name} -> {domain}")
+        else:
+          log(f"FAILED update {name}: {resp}")
+      else:
+        # Create and update resource
+        payload = build_create_payload(name, subdomain, domain_id, PANGOLIN_SITE_NUM_ID)
+        ok, resp = create_resource(payload)
+        if ok:
+          log(f"CREATED resource {name} -> {domain}")
+        else:
+          log(f"FAILED create {name}: {resp}")
+        
+        resources, err = list_resources()
+        if resources is None:
+          log(f"ERROR listing resources: {err}")
+          return
+        exists, resource_id = find_resource_by_domain(resources, domain)
+        payload = build_update_payload(name, subdomain, domain_id, labels, True)
+        ok, resp = update_resource(resource_id, payload)
+        if ok:
+          log(f"UPDATED resource {name} -> {domain}")
+        else:
+          log(f"FAILED update {name}: {resp}")
+      
+      sync_targets(
+        resource_id=resource_id,
+        ip=hostname,                     # usually the Docker service name or container hostname
+        method=target_connection_scheme, # "http" if Traefik routes HTTP, "https" otherwise
+        port=port,                       # internal service port
+        enabled=True
+      )
+
+def main():
+  wait_for_pangolin(PANGOLIN_POLL_TIMEOUT, PANGOLIN_POLL_INTERVAL)
+  sync_services()
+  listen_swarm_events()
 
 if __name__ == "__main__":
-  main_loop()
+  main()
