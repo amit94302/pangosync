@@ -253,7 +253,7 @@ def update_resource(resource_id, payload):
     return True, r.json() if "application/json" in (r.headers.get("Content-Type") or "") else {"ok": True}
   return False, {"status": r.status_code, "body": r.text}
 
-def sync_targets(resource_id: int, ip: str, method: str, port: int, enabled: bool = True):
+def sync_targets(resource_name: str, resource_domain: str, resource_id: int, ip: str, method: str, port: int, enabled: bool = True):
   """
   Ensure Pangolin resource targets are correct for given resource_id.
   """
@@ -261,7 +261,7 @@ def sync_targets(resource_id: int, ip: str, method: str, port: int, enabled: boo
   url = f"{PANGOLIN_API_URL}/resource/{resource_id}/targets"
   r = requests.get(url, headers=HEADERS, timeout=15)
   if not r.ok:
-    log(f"ERROR: failed to fetch targets for resource {resource_id} -> {r.status_code} {r.text}")
+    log(f"ERROR: failed to fetch targets for resource {resource_name} ({resource_id}) [{resource_domain}] -> {r.status_code} {r.text}")
     return False
 
   targets = r.json().get("data", {}).get("targets", [])
@@ -270,37 +270,37 @@ def sync_targets(resource_id: int, ip: str, method: str, port: int, enabled: boo
   if not targets:
     # No targets → create new
     if DRY_RUN:
-      log(f"[DRY-RUN] Would CREATE target for resource {resource_id}: {json.dumps(payload)}")
+      log(f"[DRY-RUN] Would CREATE target for resource {resource_name} ({resource_id}) [{resource_domain}]: {json.dumps(payload)}")
       return True
 
     create_url = f"{PANGOLIN_API_URL}/resource/{resource_id}/target"
     dlog("PUT", create_url, "->", json.dumps(payload))
     r2 = requests.put(create_url, headers=HEADERS, data=json.dumps(payload), timeout=15)
     if r2.ok:
-      log(f"CREATED target for resource {resource_id} -> {ip}:{port}")
+      log(f"CREATED target for resource {resource_name} ({resource_id}) [{resource_domain}] -> {method}://{ip}:{port}")
       return True
     else:
-      log(f"FAILED create target {resource_id}: {r2.status_code} {r2.text}")
+      log(f"FAILED create target for {resource_name} ({resource_id}) [{resource_domain}]: {r2.status_code} {r2.text}")
       return False
 
   # At least one target exists → update the first one if wrong
   tgt = targets[0]
   if tgt["ip"] != ip or tgt["method"] != method or tgt["port"] != port or tgt["enabled"] != enabled:
     if DRY_RUN:
-      log(f"[DRY-RUN] Would UPDATE target {tgt['targetId']} for resource {resource_id}: {json.dumps(payload)}")
+      log(f"[DRY-RUN] Would UPDATE target {tgt['targetId']} for resource {resource_name} ({resource_id}) [{resource_domain}]: {json.dumps(payload)}")
       return True
     
     update_url = f"{PANGOLIN_API_URL}/target/{tgt['targetId']}"
     dlog("POST", update_url, "->", json.dumps(desired))
     r2 = requests.post(update_url, headers=HEADERS, data=json.dumps(payload), timeout=15)
     if r2.ok:
-      log(f"UPDATED target {tgt['targetId']} for resource {resource_id} -> {ip}:{port}")
+      log(f"UPDATED target {tgt['targetId']} for resource {resource_name} ({resource_id}) [{resource_domain}] -> {method}://{ip}:{port}")
       return True
     else:
       log(f"FAILED update target {tgt['targetId']}: {r2.status_code} {r2.text}")
       return False
 
-  log(f"Target already correct for resource {resource_id} -> {method}://{ip}:{port}")
+  log(f"Target already correct for resource {resource_name} ({resource_id}) [{resource_domain}] -> {method}://{ip}:{port}")
   return True
 
 def listen_swarm_events(domain_id_map):
@@ -364,6 +364,20 @@ def handle_service_event(action, attrs, domain_id_map):
         target_connection_scheme = "https"
       break
 
+  # Add or remove from cache based on action
+  if action in ["create", "update"]:
+    try:
+      service_cache[service_name] = service  # cache the full spec
+      print(f"[{action.upper()}] {service_name} cached")
+    except docker.errors.NotFound:
+      print(f"[WARN] {hostname} not found at {action}")
+  elif action == "remove":
+    service_popped = service_cache.pop(service_name, None)
+    if service_popped:
+      print(f"[REMOVE] {service_name}: Removing from cache")
+    else:
+      print(f"[REMOVE] {service_name}: Not found in cache")
+
   for domain in domains:
     # Get internal container port
     port = service_host_published_port(service)
@@ -385,30 +399,20 @@ def handle_service_event(action, attrs, domain_id_map):
     enabled = True
     
     if action in ["create", "update"]:
-      try:
-        service_cache[service_name] = service  # cache the full spec
-        print(f"[{action.upper()}] {service_name} cached")
-        # Create resource in Pangolin
-        if not exists:
-          payload = build_create_payload(hostname, subdomain, domain_id, PANGOLIN_SITE_NUM_ID)
-          ok, resp = create_resource(payload)
-          if ok:
-            log(f"CREATED resource {hostname} -> {domain}")
-          else:
-            log(f"FAILED create {hostname}: {resp}")
-      except docker.errors.NotFound:
-        print(f"[WARN] {hostname} not found at {action}")
+      # Create resource in Pangolin
+      if not exists:
+        payload = build_create_payload(hostname, subdomain, domain_id, PANGOLIN_SITE_NUM_ID)
+        ok, resp = create_resource(payload)
+        if ok:
+          log(f"CREATED resource {hostname} -> {domain}")
+        else:
+          log(f"FAILED create {hostname}: {resp}")
     elif action == "remove":
       # Mark resource disabled in Pangolin (if DISABLE_ON_REMOVE = true)
       if exists:
         if DISABLE_ON_REMOVE:
           enabled = False
           print(f"Disabling resource for {hostname} -> {domain}")
-      service_popped = service_cache.pop(service_name, None)
-      if service_popped:
-        print(f"[REMOVE] {hostname}: Removing from cache")
-      else:
-        print(f"[REMOVE] {hostname}: Not found in cache")
       
     # Update resource      
     resources, err = list_resources()
@@ -425,6 +429,8 @@ def handle_service_event(action, attrs, domain_id_map):
         log(f"FAILED update {hostname}: {resp}")
 
     sync_targets(
+      resource_name=hostname,         # Resource Name as service hostname
+      resource_domain=domain,         # Domain at which the resource will be reachable
       resource_id=resource_id,
       ip=hostname,                     # usually the Docker service name or container hostname
       method=target_connection_scheme, # "http" if Traefik routes HTTP, "https" otherwise
@@ -513,6 +519,8 @@ def sync_services(domain_id_map):
           log(f"FAILED update {name}: {resp}")
       
       sync_targets(
+        resource_name=hostname,          # Resource Name as service hostname
+        resource_domain=domain,          # Domain at which the resource will be reachable
         resource_id=resource_id,
         ip=hostname,                     # usually the Docker service name or container hostname
         method=target_connection_scheme, # "http" if Traefik routes HTTP, "https" otherwise
