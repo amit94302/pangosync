@@ -8,6 +8,7 @@ PANGOLIN_API_KEY        = os.environ.get("PANGOLIN_API_KEY", "")
 PANGOLIN_ORG_ID         = os.environ.get("PANGOLIN_ORG_ID", "")
 PANGOLIN_SITE_ID        = os.environ.get("PANGOLIN_SITE_ID", "")  # NiceId or ID expected by your instance
 PANGOLIN_SITE_NUM_ID    = int(os.environ.get("PANGOLIN_SITE_NUM_ID", "1"))
+PANGOLIN_DOMAIN_ID_MAP  = os.environ.get("PANGOLIN_DOMAIN_ID_MAP", "")
 TRAEFIK_AUTH_MIDDLEWARE = os.environ.get("TRAEFIK_AUTH_MIDDLEWARE", "auth@file")  # Traefik authentication middleware
 DISABLE_ON_REMOVE       = os.environ.get("DISABLE_ON_REMOVE", "true").lower() in ("1", "true", "yes") # Disable all the resources on service removal
 PANGOLIN_POLL_TIMEOUT   = int(os.environ.get("PANGOLIN_POLL_TIMEOUT", "0"))
@@ -18,8 +19,8 @@ DEBUG                   = os.environ.get("DEBUG", "0") == "1"
 docker_env = docker.from_env()
 service_cache = {}
 
-if not (PANGOLIN_API_URL and PANGOLIN_API_KEY and PANGOLIN_ORG_ID and PANGOLIN_SITE_ID and PANGOLIN_SITE_NUM_ID):
-  print("ERROR: Set PANGOLIN_API_URL, PANGOLIN_API_KEY, PANGOLIN_ORG_ID, PANGOLIN_SITE_ID, and PANGOLIN_SITE_NUM_ID")
+if not (PANGOLIN_API_URL and PANGOLIN_API_KEY and PANGOLIN_ORG_ID and PANGOLIN_SITE_ID and PANGOLIN_SITE_NUM_ID and PANGOLIN_DOMAIN_ID_MAP):
+  print("ERROR: Set PANGOLIN_API_URL, PANGOLIN_API_KEY, PANGOLIN_ORG_ID, PANGOLIN_SITE_ID,  PANGOLIN_SITE_NUM_ID, and PANGOLIN_DOMAIN_ID_MAP")
   sys.exit(2)
 
 HEADERS = {
@@ -131,17 +132,40 @@ def service_host_published_port(svc):
 
 def split_domain(domain: str):
   """
-  Splits a domain into (subdomain, domainId).
-  - test.example.com -> ("test", "example.com")
-  - foo.bar.example.com -> ("foo", "bar.example.com")
-  - example.com -> (None, "example.com")  # apex, skip
+  Splits a domain into (subdomain, root_domain).
+
+  Examples:
+    - test.example.com        -> ("test", "example.com")
+    - foo.bar.example.com     -> ("foo.bar", "example.com")
+    - example.com             -> (None, "example.com")  # apex
+    - deep.foo.bar.example.com -> ("deep.foo.bar", "example.com")
   """
   parts = domain.split(".")
   if len(parts) < 3:
-      return None, domain  # apex domain -> skip
-  subdomain = parts[0]
-  domain_id = ".".join(parts[1:])
-  return subdomain, domain_id
+    return None, domain  # apex
+
+  subdomain = ".".join(parts[:-2])  # everything except last 2 labels
+  root_domain = ".".join(parts[-2:])  # last 2 labels
+  return subdomain, root_domain
+
+def load_domain_id_map(domain_id_map: str) -> dict:
+  """
+  Loads the domain ID map from a string of format:
+  'domain1=example.com,domain2=example1.com'
+  Returns: { "example.com": "domain1", "example1.com": "domain2" }
+  """
+  mapping = {}
+  for entry in domain_id_map.split(","):
+    if "=" in entry:
+      domain_id, domain = entry.split("=", 1)
+      mapping[domain.strip()] = domain_id.strip()
+  return mapping
+
+def get_domain_id(root_domain: str, domain_id_map: dict) -> str | None:
+  """
+  Given a root_domain, return its domain_id from the map.
+  """
+  return domain_id_map.get(root_domain)
 
 def list_resources():
   """Fetch all resources for the site and return a list."""
@@ -279,7 +303,7 @@ def sync_targets(resource_id: int, ip: str, method: str, port: int, enabled: boo
   log(f"Target already correct for resource {resource_id} -> {method}://{ip}:{port}")
   return True
 
-def listen_swarm_events():
+def listen_swarm_events(domain_id_map):
   for event in docker_env.events(decode=True):
     try:
       action = event.get("Action")
@@ -289,7 +313,7 @@ def listen_swarm_events():
       # Listen only to Swarm services (not every container event)
       if typ == "service" and action in ["create", "update", "remove"]:
         print(f"[EVENT] Service {action}: {json.dumps(actor)}")
-        handle_service_event(action, actor)
+        handle_service_event(action, actor, domain_id_map)
 
     except Exception as e:
       print(f"[ERROR] Failed processing event: {e}")
@@ -304,7 +328,7 @@ def get_service_with_retry(client, service_name, retries=20, delay=0.5):
       time.sleep(delay)
   raise RuntimeError(f"Service {service_name} not ready after {retries} retries")
 
-def handle_service_event(action, attrs):
+def handle_service_event(action, attrs, domain_id_map):
   service_name = attrs.get("name")
   if not service_name:
     return
@@ -314,12 +338,15 @@ def handle_service_event(action, attrs):
   if not service:
     try:
       service, labels = get_service_with_retry(docker_env, service_name)
-      service_cache[service_name] = service
     except RuntimeError as e:
       log(f"[ERROR] Failed to fetch service {service_name}: {e}")
       return
   else:
-    labels = service.attrs.get("Spec", {}).get("Labels", {}) or {}
+    if action == "remove":
+      labels = service.attrs.get("Spec", {}).get("Labels", {}) or {}
+    else:
+      time.sleep(3)
+      service, labels = get_service_with_retry(docker_env, service_name)
   print(f"Service {service_name} {action} detected")
   # print(f"{labels}")
   
@@ -353,7 +380,8 @@ def handle_service_event(action, attrs):
       log(f"ERROR listing resources: {err}")
       return
     exists, resource_id = find_resource_by_domain(resources, domain)
-    subdomain, domain_id = split_domain(domain)
+    subdomain, root_domain = split_domain(domain)
+    domain_id = get_domain_id(root_domain, domain_id_map)
     enabled = True
     
     if action in ["create", "update"]:
@@ -404,7 +432,7 @@ def handle_service_event(action, attrs):
       enabled=True
     )
 
-def sync_services():
+def sync_services(domain_id_map):
   client = docker.DockerClient.from_env()
 
   services = client.services.list()
@@ -450,7 +478,8 @@ def sync_services():
       name = hostname # domain
       exists, resource_id = find_resource_by_domain(resources, domain)
 
-      subdomain, domain_id = split_domain(domain)
+      subdomain, root_domain = split_domain(domain)
+      domain_id = get_domain_id(root_domain, domain_id_map)
       if not subdomain:
         log(f"SKIP {name} -> {domain}: apex domain, no subdomain")
         continue
@@ -493,8 +522,9 @@ def sync_services():
 
 def main():
   wait_for_pangolin(PANGOLIN_POLL_TIMEOUT, PANGOLIN_POLL_INTERVAL)
-  sync_services()
-  listen_swarm_events()
+  domain_id_map = load_domain_id_map(PANGOLIN_DOMAIN_ID_MAP)
+  sync_services(domain_id_map)
+  listen_swarm_events(domain_id_map)
 
 if __name__ == "__main__":
   main()
