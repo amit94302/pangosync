@@ -3,7 +3,7 @@ gitea: none
 include_toc: true
 ---
 
-# [PangoSync](https://git.sharez.vip/me/pangosync)
+# [PangoSync](https://git.orora.vip/me/pangosync)
 
  A Dockerized script to automatically create, update, and disable resources and their targets in a [`Pangolin`](https://github.com/fosrl/pangolin) instance based on [`Traefik`](https://github.com/traefik/traefik) labels in Docker Swarm services.
 
@@ -26,17 +26,16 @@ The script is configured using environment variables:
 
 | Variable                  | Description                                                                                                | Default         | Required |
 | ------------------------- | ---------------------------------------------------------------------------------------------------------- | --------------- | -------- |
-| `PANGOLIN_API_URL`        | The base URL for the Pangolin API (e.g., `https://api.example.com/v1`).                                      | `""`            | Yes      |
+| `PANGOLIN_API_URL`        | The base URL for the Pangolin API (e.g., `https://api.example.com/v1`).                                    | `""`            | Yes      |
 | `PANGOLIN_API_KEY`        | Your Pangolin API key.                                                                                     | `""`            | Yes      |
 | `PANGOLIN_ORG_ID`         | The ID of your organization in Pangolin.                                                                   | `""`            | Yes      |
-| `PANGOLIN_SITE_ID`        | The NiceId or ID of the site in Pangolin.                                                                  | `""`            | Yes      |
-| `PANGOLIN_SITE_NUM_ID`    | The numeric ID of the site in Pangolin.                                                                    | `"1"`           | Yes      |
-| `PANGOLIN_DOMAIN_ID_MAP`  | A comma-separated list of `domain_id=domain` pairs (e.g., `1=example.com,2=example.org`).                    | `""`            | Yes      |
+| `PANGOLIN_SITE_ID`        | The numeric ID of the site in Pangolin.                                                                    | `"1"`           | Yes      |
+| `PANGOLIN_DOMAIN_ID_MAP`  | A comma-separated list of `domain_id=domain` pairs (e.g., `domain1=example.com,domain2=example.org`).      | `""`            | Yes      |
 | `TRAEFIK_AUTH_MIDDLEWARE` | The name of the Traefik middleware used for authentication. If present on a router, SSO will be enabled.   | `"auth@file"`   | No       |
 | `DISABLE_ON_REMOVE`       | If `true`, resources will be disabled in Pangolin when the corresponding service is removed.               | `"true"`        | No       |
 | `PANGOLIN_POLL_TIMEOUT`   | Timeout in seconds to wait for the Pangolin API to be healthy on startup. `0` means wait forever.          | `"0"`           | No       |
 | `PANGOLIN_POLL_INTERVAL`  | Interval in seconds between Pangolin API health checks on startup.                                         | `"5"`           | No       |
-| `DRY_RUN`                 | If `1`, the script will log the actions it would take without actually making any changes.                   | `"0"`           | No       |
+| `DRY_RUN`                 | If `1`, the script will log the actions it would take without actually making any changes.                 | `"0"`           | No       |
 | `DEBUG`                   | If `1`, enables verbose debug logging.                                                                     | `"0"`           | No       |
 
 ---

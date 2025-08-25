@@ -6,8 +6,7 @@ import docker
 PANGOLIN_API_URL        = os.environ.get("PANGOLIN_API_URL", "").rstrip("/")  # e.g. https://api.example.com/v1
 PANGOLIN_API_KEY        = os.environ.get("PANGOLIN_API_KEY", "")
 PANGOLIN_ORG_ID         = os.environ.get("PANGOLIN_ORG_ID", "")
-PANGOLIN_SITE_ID        = os.environ.get("PANGOLIN_SITE_ID", "")  # NiceId or ID expected by your instance
-PANGOLIN_SITE_NUM_ID    = int(os.environ.get("PANGOLIN_SITE_NUM_ID", "1"))
+PANGOLIN_SITE_ID        = int(os.environ.get("PANGOLIN_SITE_ID", "1"))
 PANGOLIN_DOMAIN_ID_MAP  = os.environ.get("PANGOLIN_DOMAIN_ID_MAP", "")
 TRAEFIK_AUTH_MIDDLEWARE = os.environ.get("TRAEFIK_AUTH_MIDDLEWARE", "auth@file")  # Traefik authentication middleware
 DISABLE_ON_REMOVE       = os.environ.get("DISABLE_ON_REMOVE", "true").lower() in ("1", "true", "yes") # Disable all the resources on service removal
@@ -19,8 +18,8 @@ DEBUG                   = os.environ.get("DEBUG", "0") == "1"
 docker_env = docker.from_env()
 service_cache = {}
 
-if not (PANGOLIN_API_URL and PANGOLIN_API_KEY and PANGOLIN_ORG_ID and PANGOLIN_SITE_ID and PANGOLIN_SITE_NUM_ID and PANGOLIN_DOMAIN_ID_MAP):
-  print("ERROR: Set PANGOLIN_API_URL, PANGOLIN_API_KEY, PANGOLIN_ORG_ID, PANGOLIN_SITE_ID,  PANGOLIN_SITE_NUM_ID, and PANGOLIN_DOMAIN_ID_MAP")
+if not (PANGOLIN_API_URL and PANGOLIN_API_KEY and PANGOLIN_ORG_ID and PANGOLIN_SITE_ID and PANGOLIN_DOMAIN_ID_MAP):
+  print("ERROR: Set PANGOLIN_API_URL, PANGOLIN_API_KEY, PANGOLIN_ORG_ID, PANGOLIN_SITE_ID, and PANGOLIN_DOMAIN_ID_MAP")
   sys.exit(2)
 
 HEADERS = {
@@ -169,7 +168,7 @@ def get_domain_id(root_domain: str, domain_id_map: dict) -> str | None:
 
 def list_resources():
   """Fetch all resources for the site and return a list."""
-  url = f"{PANGOLIN_API_URL}/site/{PANGOLIN_SITE_NUM_ID}/resources"
+  url = f"{PANGOLIN_API_URL}/site/{PANGOLIN_SITE_ID}/resources"
   try:
     r = requests.get(url, headers=HEADERS, timeout=20)
   except Exception as e:
@@ -229,7 +228,7 @@ def build_update_payload(name, subdomain, domain_id, labels, enabled):
 
 def create_resource(payload):
   """Create a new resource in Pangolin (PUT)."""
-  url = f"{PANGOLIN_API_URL}/org/{PANGOLIN_ORG_ID}/site/{PANGOLIN_SITE_NUM_ID}/resource"
+  url = f"{PANGOLIN_API_URL}/org/{PANGOLIN_ORG_ID}/site/{PANGOLIN_SITE_ID}/resource"
   dlog("CREATE", url, "payload:", json.dumps(payload))
   if DRY_RUN:
     log("[DRY-RUN] Would CREATE at", url, "->", json.dumps(payload))
@@ -401,7 +400,7 @@ def handle_service_event(action, attrs, domain_id_map):
     if action in ["create", "update"]:
       # Create resource in Pangolin
       if not exists:
-        payload = build_create_payload(hostname, subdomain, domain_id, PANGOLIN_SITE_NUM_ID)
+        payload = build_create_payload(hostname, subdomain, domain_id, PANGOLIN_SITE_ID)
         ok, resp = create_resource(payload)
         if ok:
           log(f"CREATED resource {hostname} -> {domain}")
@@ -499,7 +498,7 @@ def sync_services(domain_id_map):
           log(f"FAILED update {name}: {resp}")
       else:
         # Create and update resource
-        payload = build_create_payload(name, subdomain, domain_id, PANGOLIN_SITE_NUM_ID)
+        payload = build_create_payload(name, subdomain, domain_id, PANGOLIN_SITE_ID)
         ok, resp = create_resource(payload)
         if ok:
           log(f"CREATED resource {name} -> {domain}")
