@@ -11,12 +11,13 @@ include_toc: true
 
 The script performs two main functions:
 
-1.  **Initial Sync:** On startup, it scans all running Docker Swarm services. For each service with the appropriate labels, it ensures a corresponding resource and target exist and are correctly configured in Pangolin.
-2.  **Event Listening:** After the initial sync, the script listens for Docker Swarm service events (`create`, `update`, `remove`). When an event is detected, it processes the service to create, update, or disable the corresponding Pangolin resource and target in real-time.
+1. **Initial Sync:** On startup, it scans all running Docker Swarm services. For each service with the appropriate labels, it ensures a corresponding resource and target exist and are correctly configured in Pangolin.
+2. **Event Listening:** After the initial sync, the script listens for Docker Swarm service events (`create`, `update`, `remove`). When an event is detected, it processes the service to create, update, or disable the corresponding Pangolin resource and target in real-time.
 
 The script determines the domain for a service by looking for the following labels in order of priority:
-1.  `pangolin.domain`
-2.  `traefik.http.routers.*.rule` (extracting the domain from the `Host(...)` rule, multiple `Host(...)` rules are supported)
+
+1. `pangolin.domain`
+2. `traefik.http.routers.*.rule` (extracting the domain from the `Host(...)` rule, multiple `Host(...)` rules are supported)
 
 ---
 
@@ -80,16 +81,16 @@ services:
 
 The script uses the following Docker service labels to configure Pangolin resources:
 
-| Label                                                      | Description                                                                                                                            |
-| ---------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------- |
-| `pangolin.domain`                                          | Explicitly sets the full domain for the Pangolin resource. This takes precedence over domains extracted from Traefik rules.              |
-| `pangolin.hostname`                                        | Overrides the hostname used for the Pangolin resource name and target IP. Defaults to the container hostname or a sanitized service name. |
-| `pangolin.autosync`                                        | If `traefik.enable` is not `true`, this label must be set to `true` for the service to be processed.                                    |
-| `traefik.enable`                                           | If set to `true`, the service will be processed.                                                                                       |
-| `traefik.http.routers.<router_name>.rule`                  | The script parses `Host(...)` rules to determine the domain(s) for the service.                                                        |
-| `traefik.http.routers.<router_name>.middlewares`           | Used to check for the presence of the authentication middleware to enable/disable SSO on the Pangolin resource.                          |
-| `traefik.http.services.<service_name>.loadbalancer.server.port` | Explicitly sets the target port for the Pangolin resource.                                                                             |
-| `traefik.http.services.<service_name>.loadbalancer.server.scheme` | Sets the target protocol (`http` or `https`).                                                                                          |
+| Label                                                             | Description                                                                                                                               |
+| ----------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------- |
+| `pangolin.domain`                                                 | Explicitly sets the full domain for the Pangolin resource. This takes precedence over domains extracted from Traefik rules.               |
+| `pangolin.hostname`                                               | Overrides the hostname used for the Pangolin resource name and target IP. Defaults to the container hostname or a sanitized service name. |
+| `pangolin.autosync`                                               | If `traefik.enable` is not `true`, this label must be set to `true` for the service to be processed.                                      |
+| `traefik.enable`                                                  | If set to `true`, the service will be processed.                                                                                          |
+| `traefik.http.routers.<router_name>.rule`                         | The script parses `Host(...)` rules to determine the domain(s) for the service.                                                           |
+| `traefik.http.routers.<router_name>.middlewares`                  | Used to check for the presence of the authentication middleware to enable/disable SSO on the Pangolin resource.                           |
+| `traefik.http.services.<service_name>.loadbalancer.server.port`   | Explicitly sets the target port for the Pangolin resource.                                                                                |
+| `traefik.http.services.<service_name>.loadbalancer.server.scheme` | Sets the target protocol (`http` or `https`).                                                                                             |
 
 ---
 

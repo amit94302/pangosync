@@ -2,6 +2,9 @@
   "extends": [
     "config:recommended"
   ],
+  "assignees": [
+    "amit96025"
+  ],
   "packageRules": [
     {
       "matchCategories": [

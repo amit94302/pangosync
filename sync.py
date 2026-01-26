@@ -168,7 +168,7 @@ def get_domain_id(root_domain: str, domain_id_map: dict) -> str | None:
 
 def list_resources():
   """Fetch all resources for the site and return a list."""
-  url = f"{PANGOLIN_API_URL}/site/{PANGOLIN_SITE_ID}/resources"
+  url = f"{PANGOLIN_API_URL}/org/{PANGOLIN_ORG_ID}/resources"
   try:
     r = requests.get(url, headers=HEADERS, timeout=20)
   except Exception as e:
@@ -192,15 +192,15 @@ def find_resource_by_domain(resources, domain):
       return True, res.get("resourceId")
   return False, None
 
-def build_create_payload(name, subdomain, domain_id, site_id):
+def build_create_payload(name, subdomain, domain_id):
   """Minimal payload for Pangolin create (PUT)."""
   return {
     "name": name,
     "subdomain": subdomain,
-    "siteId": site_id,
     "http": True,
     "protocol": "tcp",
-    "domainId": domain_id
+    "domainId": domain_id,
+    "stickySession": True
   }
 
 def build_update_payload(name, subdomain, domain_id, labels, enabled):
@@ -223,12 +223,13 @@ def build_update_payload(name, subdomain, domain_id, labels, enabled):
     "sso": sso_enabled,
     "blockAccess": False,
     "emailWhitelistEnabled": False,
-    "enabled": enabled
+    "enabled": enabled,
+    "stickySession": True
   }
 
 def create_resource(payload):
   """Create a new resource in Pangolin (PUT)."""
-  url = f"{PANGOLIN_API_URL}/org/{PANGOLIN_ORG_ID}/site/{PANGOLIN_SITE_ID}/resource"
+  url = f"{PANGOLIN_API_URL}/org/{PANGOLIN_ORG_ID}/resource"
   dlog("CREATE", url, "payload:", json.dumps(payload))
   if DRY_RUN:
     log("[DRY-RUN] Would CREATE at", url, "->", json.dumps(payload))
@@ -252,7 +253,7 @@ def update_resource(resource_id, payload):
     return True, r.json() if "application/json" in (r.headers.get("Content-Type") or "") else {"ok": True}
   return False, {"status": r.status_code, "body": r.text}
 
-def sync_targets(resource_name: str, resource_domain: str, resource_id: int, ip: str, method: str, port: int, enabled: bool = True):
+def sync_targets(resource_name: str, resource_domain: str, resource_id: int, site_id: str, ip: str, method: str, port: int, enabled: bool = True):
   """
   Ensure Pangolin resource targets are correct for given resource_id.
   """
@@ -264,7 +265,7 @@ def sync_targets(resource_name: str, resource_domain: str, resource_id: int, ip:
     return False
 
   targets = r.json().get("data", {}).get("targets", [])
-  payload = {"ip": ip, "method": method, "port": port, "enabled": enabled}
+  payload = {"siteId": site_id, "ip": ip, "method": method, "port": port, "enabled": enabled}
 
   if not targets:
     # No targets → create new
@@ -290,7 +291,7 @@ def sync_targets(resource_name: str, resource_domain: str, resource_id: int, ip:
       return True
     
     update_url = f"{PANGOLIN_API_URL}/target/{tgt['targetId']}"
-    dlog("POST", update_url, "->", json.dumps(desired))
+    dlog("POST", update_url, "->", json.dumps(payload))
     r2 = requests.post(update_url, headers=HEADERS, data=json.dumps(payload), timeout=15)
     if r2.ok:
       log(f"UPDATED target {tgt['targetId']} for resource {resource_name} ({resource_id}) [{resource_domain}] -> {method}://{ip}:{port}")
@@ -302,7 +303,7 @@ def sync_targets(resource_name: str, resource_domain: str, resource_id: int, ip:
   log(f"Target already correct for resource {resource_name} ({resource_id}) [{resource_domain}] -> {method}://{ip}:{port}")
   return True
 
-def listen_swarm_events(domain_id_map):
+def listen_swarm_events(domain_id_map, site_id):
   for event in docker_env.events(decode=True):
     try:
       action = event.get("Action")
@@ -312,7 +313,7 @@ def listen_swarm_events(domain_id_map):
       # Listen only to Swarm services (not every container event)
       if typ == "service" and action in ["create", "update", "remove"]:
         print(f"[EVENT] Service {action}: {json.dumps(actor)}")
-        handle_service_event(action, actor, domain_id_map)
+        handle_service_event(action, actor, domain_id_map, site_id)
 
     except Exception as e:
       print(f"[ERROR] Failed processing event: {e}")
@@ -327,7 +328,7 @@ def get_service_with_retry(client, service_name, retries=20, delay=0.5):
       time.sleep(delay)
   raise RuntimeError(f"Service {service_name} not ready after {retries} retries")
 
-def handle_service_event(action, attrs, domain_id_map):
+def handle_service_event(action, attrs, domain_id_map, site_id):
   service_name = attrs.get("name")
   if not service_name:
     return
@@ -428,16 +429,17 @@ def handle_service_event(action, attrs, domain_id_map):
         log(f"FAILED update {hostname}: {resp}")
 
     sync_targets(
-      resource_name=hostname,         # Resource Name as service hostname
-      resource_domain=domain,         # Domain at which the resource will be reachable
+      resource_name=hostname,          # Resource Name as service hostname
+      resource_domain=domain,          # Domain at which the resource will be reachable
       resource_id=resource_id,
+      site_id=site_id,
       ip=hostname,                     # usually the Docker service name or container hostname
       method=target_connection_scheme, # "http" if Traefik routes HTTP, "https" otherwise
       port=port,                       # internal service port
       enabled=True
     )
 
-def sync_services(domain_id_map):
+def sync_services(domain_id_map, site_id):
   client = docker.DockerClient.from_env()
 
   services = client.services.list()
@@ -498,7 +500,7 @@ def sync_services(domain_id_map):
           log(f"FAILED update {name}: {resp}")
       else:
         # Create and update resource
-        payload = build_create_payload(name, subdomain, domain_id, PANGOLIN_SITE_ID)
+        payload = build_create_payload(name, subdomain, domain_id)
         ok, resp = create_resource(payload)
         if ok:
           log(f"CREATED resource {name} -> {domain}")
@@ -521,6 +523,7 @@ def sync_services(domain_id_map):
         resource_name=hostname,          # Resource Name as service hostname
         resource_domain=domain,          # Domain at which the resource will be reachable
         resource_id=resource_id,
+        site_id=site_id,
         ip=hostname,                     # usually the Docker service name or container hostname
         method=target_connection_scheme, # "http" if Traefik routes HTTP, "https" otherwise
         port=port,                       # internal service port
@@ -530,8 +533,8 @@ def sync_services(domain_id_map):
 def main():
   wait_for_pangolin(PANGOLIN_POLL_TIMEOUT, PANGOLIN_POLL_INTERVAL)
   domain_id_map = load_domain_id_map(PANGOLIN_DOMAIN_ID_MAP)
-  sync_services(domain_id_map)
-  listen_swarm_events(domain_id_map)
+  sync_services(domain_id_map, PANGOLIN_SITE_ID)
+  listen_swarm_events(domain_id_map, PANGOLIN_SITE_ID)
 
 if __name__ == "__main__":
   main()
